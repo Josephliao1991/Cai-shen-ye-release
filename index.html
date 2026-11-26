@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>財神爺接金幣</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #7a0f0f;
+    font-family: "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
+    user-select: none; -webkit-user-select: none;
+    touch-action: none;
+  }
+  #game { display: block; width: 100%; height: 100%; }
+  .overlay {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 18px;
+    background: rgba(60, 0, 0, 0.72);
+    color: #ffe9a8; text-align: center; padding: 24px;
+  }
+  .overlay.hidden { display: none; }
+  .overlay h1 { font-size: clamp(32px, 8vw, 60px); color: #ffd23f; text-shadow: 0 3px 0 #8a1c00; letter-spacing: 4px; }
+  .overlay p { font-size: clamp(15px, 3.6vw, 20px); line-height: 1.7; }
+  .overlay .result { font-size: clamp(28px, 7vw, 48px); color: #ffd23f; font-weight: bold; }
+  .overlay button {
+    font: inherit; font-size: clamp(18px, 4.5vw, 24px); font-weight: bold;
+    padding: 12px 36px; border: none; border-radius: 999px; cursor: pointer;
+    color: #7a0f0f; background: linear-gradient(#ffe27a, #f5b301);
+    box-shadow: 0 4px 0 #a86b00;
+  }
+  .overlay button:active { transform: translateY(3px); box-shadow: 0 1px 0 #a86b00; }
+  #countdown {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: clamp(90px, 25vw, 180px); font-weight: bold; color: #ffd23f;
+    text-shadow: 0 6px 0 #8a1c00; pointer-events: none;
+  }
+  #countdown.hidden { display: none; }
+  /* 倒數動畫：數字由大縮小進場＋回彈＋淡出；「開始！」放大淡出 */
+  #countdown { will-change: transform, opacity; white-space: nowrap; }
+  #countdown.cd-num { animation: cdPop 1s ease-out both; }
+  #countdown.cd-go  { font-size: clamp(60px, 18vw, 140px); animation: cdGo 0.7s ease-out both; }
+  @keyframes cdPop {
+    0%   { transform: scale(1.8);  opacity: 0; }
+    20%  { transform: scale(0.9);  opacity: 1; }
+    32%  { transform: scale(1.06); opacity: 1; }
+    45%  { transform: scale(1);    opacity: 1; }
+    78%  { transform: scale(1);    opacity: 1; }
+    100% { transform: scale(0.7);  opacity: 0; }
+  }
+  @keyframes cdGo {
+    0%   { transform: scale(0.6); opacity: 0; }
+    25%  { transform: scale(1.1); opacity: 1; }
+    60%  { transform: scale(1.2); opacity: 1; }
+    100% { transform: scale(1.6); opacity: 0; }
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="countdown" class="hidden">3</div>
+
+<div id="startScreen" class="overlay">
+  <h1>財神爺接金幣</h1>
+  <p>財神爺站在祥雲上撒金幣，<br>移動竹簍把金幣接住！</p>
+  <p>操作：← → 方向鍵 或 A / D<br>也可以用滑鼠移動、手機手指拖曳</p>
+  <p>每場 30 秒，共掉落 50 枚金幣，越後面掉得越快！</p>
+  <p>小心！還會掉下 10 顆石頭，接到一顆扣 5 分（最低 0 分）。</p>
+  <button id="startBtn">開始遊戲</button>
+</div>
+
+<div id="endScreen" class="overlay hidden">
+  <h1>時間到！</h1>
+  <div class="result" id="resultText">得分 0 分</div>
+  <p id="resultDetail">接到金幣 0 / 50 枚、打到石頭 0 顆</p>
+  <p id="resultComment"></p>
+  <button id="againBtn">再玩一次</button>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ===== 遊戲參數 =====
+  var GAME_DURATION = 30;     // 秒
+  var TOTAL_COINS = 50;       // 整場固定掉落數
+  var LAST_SPAWN_AT = 28.5;   // 最後一枚的掉落時間（留時間讓它在 30 秒前落地）
+  var COUNTDOWN = 3;          // 開場倒數秒數
+  // 下落速度（每秒畫面高度比例）：隨時間線性加快
+  var FALL_SPEED_START = 0.25;
+  var FALL_SPEED_END = 0.90;
+  // 石頭（障礙物）：每局固定數量，從 STONE_FIRST_AT 到 STONE_LAST_AT 秒等間隔掉落
+  // 開始畫面與 README 的「10 顆」「扣 5 分」為靜態文字，改這裡時要一併修改
+  var TOTAL_STONES = 10;
+  var STONE_PENALTY = 5;       // 打到一顆扣的分數（得分最低 0）
+  var STONE_FIRST_AT = 2;      // 第一顆的掉落時間（秒）
+  var STONE_LAST_AT = 27;      // 最後一顆的掉落時間（秒；從畫面最上方掉，需在 30 秒前落到竹簍）
+  // 打到石頭時竹簍閃爍：亮 → 正常 → 亮 → 正常，每段 BASKET_FLASH_STEP 秒
+  var BASKET_FLASH_STEP = 0.1;                    // 每段秒數（規格容許每段「亮」0.06～0.15 秒）
+  var BASKET_FLASH_TOTAL = BASKET_FLASH_STEP * 4; // 總長 0.4 秒（規格容許 0.3～0.5 秒），恰好亮兩次
+
+  var canvas = document.getElementById('game');
+  var ctx = canvas.getContext('2d');
+  var countdownEl = document.getElementById('countdown');
+  var startScreen = document.getElementById('startScreen');
+  var endScreen = document.getElementById('endScreen');
+  var resultText = document.getElementById('resultText');
+  var resultDetail = document.getElementById('resultDetail');
+  var resultComment = document.getElementById('resultComment');
+
+  var W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = window.devicePixelRatio || 1;
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.round(W * DPR);
+    canvas.height = Math.round(H * DPR);
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    if (player) player.x = clamp(player.x, basketHalf(), W - basketHalf());
+    if (god) god.x = clamp(god.x, godHalf(), W - godHalf());
+  }
+
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function unit() { return Math.min(W, H * 0.75); }       // 依畫面大小縮放的基準長度
+  function basketHalf() { return unit() * 0.10; }
+  function godHalf() { return unit() * 0.11; }
+  function coinR() { return unit() * 0.035; }
+  function stoneR() { return unit() * 0.038; }   // 略大於金幣，大小相近
+  function godY() { return Math.max(70, H * 0.13); }
+  function playerY() { return H - unit() * 0.09 - 10; }
+
+  // ===== 狀態 =====
+  var state = 'menu';   // menu | countdown | playing | over
+  var elapsed = 0;      // 遊戲進行秒數（只在 playing 時累加）
+  var countdownLeft = 0;
+  var score = 0;        // 得分（HUD 💰 與結束畫面「得分 X 分」）；接金幣 +1、打到石頭 −STONE_PENALTY，最低 0
+  var coinsCaught = 0;  // 本局接到的金幣數
+  var stonesHit = 0;    // 本局打到的石頭數
+  var spawned = 0;
+  var spawnTimes = [];
+  var coins = [];
+  var stones = [];
+  var stonesSpawned = 0;
+  var stoneTimes = [];
+  var effects = [];
+  var basketFlash = 0;  // 竹簍閃爍剩餘秒數（0 = 不閃）；只在 playing 時隨遊戲時間扣
+  var player = null;
+  var god = null;
+  var keys = { left: false, right: false };
+  var pointerX = null;
+
+  // 產生 TOTAL_COINS 枚的掉落時間：t_i = LAST * sqrt(i/(N-1))
+  // 密度與時間成正比 → 越後面掉得越頻繁；第 0 枚在 0 秒、最後一枚在 LAST_SPAWN_AT 秒。
+  function buildSchedule() {
+    var arr = [];
+    for (var i = 0; i < TOTAL_COINS; i++) {
+      arr.push(LAST_SPAWN_AT * Math.sqrt(i / (TOTAL_COINS - 1)));
+    }
+    return arr;
+  }
+
+  // 石頭掉落時間：STONE_FIRST_AT 到 STONE_LAST_AT 等間隔，共 TOTAL_STONES 顆
+  function buildStoneSchedule() {
+    var arr = [];
+    for (var i = 0; i < TOTAL_STONES; i++) {
+      arr.push(TOTAL_STONES > 1
+        ? STONE_FIRST_AT + (STONE_LAST_AT - STONE_FIRST_AT) * i / (TOTAL_STONES - 1)
+        : STONE_FIRST_AT);
+    }
+    return arr;
+  }
+
+  // 石頭外形：7 個頂點的半徑係數（0.72～1.0，以 stoneR() 的倍數保存，不會超出 stoneR()）
+  function makeStoneShape() {
+    var shape = [];
+    for (var i = 0; i < 7; i++) shape.push(0.72 + Math.random() * 0.28);
+    return shape;
+  }
+
+  function fallSpeedAt(t) {
+    var p = clamp(t / GAME_DURATION, 0, 1);
+    return (FALL_SPEED_START + (FALL_SPEED_END - FALL_SPEED_START) * p) * H;
+  }
+
+  function resetGame() {
+    elapsed = 0;
+    score = 0;
+    coinsCaught = 0;
+    stonesHit = 0;
+    spawned = 0;
+    coins = [];
+    stones = [];
+    stonesSpawned = 0;
+    effects = [];
+    basketFlash = 0;
+    spawnTimes = buildSchedule();
+    stoneTimes = buildStoneSchedule();
+    player = { x: W / 2, speed: 0 };
+    god = { x: W / 2, target: W / 2, speed: 0, bob: 0, dir: 1 };
+    pickGodTarget();
+  }
+
+  function pickGodTarget() {
+    var m = godHalf() + 10;
+    // 新目標至少離目前位置 30% 可移動寬度，避免財神爺老在中間徘徊
+    var span = Math.max(1, W - 2 * m);
+    var t = m + Math.random() * span;
+    for (var k = 0; k < 8 && Math.abs(t - god.x) < span * 0.3; k++) t = m + Math.random() * span;
+    god.target = t;
+    // 速度隨時間略增
+    god.speed = W * (0.25 + 0.35 * (elapsed / GAME_DURATION)) * (0.7 + Math.random() * 0.6);
+  }
+
+  // ===== 倒數顯示（只負責畫面，計時仍由 countdownLeft 控制）=====
+  var shownCount = 0;   // 目前 #countdown 顯示的數字（0 = 沒有顯示數字）
+  var goLeft = 0;       // 「開始！」剩餘顯示秒數
+
+  function showCountdown(text, cls) {
+    countdownEl.classList.remove('cd-num', 'cd-go', 'hidden');
+    countdownEl.textContent = text;   // 固定字串，一律用 textContent
+    void countdownEl.offsetWidth;     // 強制 reflow，讓同名動畫能從頭重播
+    countdownEl.classList.add(cls);
+  }
+
+  function hideCountdown() {
+    countdownEl.classList.remove('cd-num', 'cd-go');
+    countdownEl.classList.add('hidden');
+    goLeft = 0;
+    shownCount = 0;
+  }
+
+  function startCountdown() {
+    initAudio();
+    resetGame();
+    startScreen.classList.add('hidden');
+    endScreen.classList.add('hidden');
+    state = 'countdown';
+    countdownLeft = COUNTDOWN;
+    goLeft = 0;
+    shownCount = COUNTDOWN;
+    showCountdown(String(COUNTDOWN), 'cd-num');
+  }
+
+  function endGame() {
+    hideCountdown();
+    state = 'over';
+    basketFlash = 0;      // 時間到立即停止閃爍，結束畫面背後竹簍為正常外觀
+    coins = [];
+    stones = [];
+    resultText.textContent = '得分 ' + score + ' 分';
+    resultDetail.textContent = '接到金幣 ' + coinsCaught + ' / ' + TOTAL_COINS + ' 枚、打到石頭 ' + stonesHit + ' 顆';
+    var c;
+    // 依得分比例判定（得分最高 = TOTAL_COINS）（90%／70%／40%），用整數比較避免浮點誤差
+    if (score * 10 >= TOTAL_COINS * 9) c = '財源滾滾，大富大貴！';
+    else if (score * 10 >= TOTAL_COINS * 7) c = '招財進寶，收穫滿滿！';
+    else if (score * 10 >= TOTAL_COINS * 4) c = '小有斬獲，再接再厲！';
+    else c = '財神爺說：下次手腳快一點！';
+    resultComment.textContent = c;
+    endScreen.classList.remove('hidden');
+  }
+
+  // ===== 音效 =====
+  // 共用單一 AudioContext；只在「開始遊戲／再玩一次」的點擊手勢內建立或恢復。
+  var audioCtx = null;
+  var sfxOut = null;
+
+  function resumeAudio() {
+    if (audioCtx && audioCtx.state !== 'running') {
+      try {
+        var p = audioCtx.resume();
+        if (p && p.catch) p.catch(function () {});
+      } catch (e) {}
+    }
+  }
+
+  function initAudio() {
+    if (audioCtx) { resumeAudio(); return; }
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try {
+      audioCtx = new AC();
+      var master = audioCtx.createGain();
+      master.gain.value = 0.5;
+      if (audioCtx.createDynamicsCompressor) {
+        var comp = audioCtx.createDynamicsCompressor();
+        master.connect(comp);
+        comp.connect(audioCtx.destination);
+      } else {
+        master.connect(audioCtx.destination);
+      }
+      sfxOut = master;
+      // iOS Safari 舊版：在手勢內播一個空 buffer 以解鎖音訊
+      var buf = audioCtx.createBuffer(1, 1, 22050);
+      var src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(audioCtx.destination);
+      src.start(0);
+    } catch (e) {
+      audioCtx = null;
+      sfxOut = null;
+      return;
+    }
+    resumeAudio();
+  }
+
+  // 接到金幣的「叮」：triangle 波，C6 → G6，約 0.18 秒
+  function playCoinSound() {
+    if (!audioCtx || !sfxOut) return;
+    try {
+      resumeAudio();
+      var t0 = audioCtx.currentTime;
+      var osc = audioCtx.createOscillator();
+      var g = audioCtx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(1046.5, t0);
+      osc.frequency.setValueAtTime(1568, t0 + 0.06);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.35, t0 + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.18);
+      osc.connect(g);
+      g.connect(sfxOut);
+      osc.onended = function () {
+        try { osc.disconnect(); g.disconnect(); } catch (e) {}
+      };
+      osc.start(t0);
+      osc.stop(t0 + 0.2);
+    } catch (e) {}
+  }
+
+  // ===== 輸入 =====
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') { keys.left = true; pointerX = null; e.preventDefault(); }
+    if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') { keys.right = true; pointerX = null; e.preventDefault(); }
+  });
+  window.addEventListener('keyup', function (e) {
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.left = false;
+    if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.right = false;
+  });
+  window.addEventListener('mousemove', function (e) { pointerX = e.clientX; });
+  function onTouch(e) {
+    if (e.touches && e.touches.length) {
+      pointerX = e.touches[0].clientX;
+      if (state === 'playing' || state === 'countdown') e.preventDefault();
+    }
+  }
+  canvas.addEventListener('touchstart', onTouch, { passive: false });
+  canvas.addEventListener('touchmove', onTouch, { passive: false });
+  window.addEventListener('blur', function () { keys.left = keys.right = false; });
+
+  document.getElementById('startBtn').addEventListener('click', startCountdown);
+  document.getElementById('againBtn').addEventListener('click', startCountdown);
+
+  // ===== 更新 =====
+  function update(dt) {
+    if (state === 'countdown') {
+      countdownLeft -= dt;
+      updatePlayer(dt);
+      if (countdownLeft <= 0) {
+        state = 'playing';                 // 遊戲開始時間點與原本相同
+        shownCount = 0;
+        goLeft = 0.7;
+        showCountdown('開始！', 'cd-go');  // 與遊戲開始同一幀顯示，不延後
+      } else {
+        var n = Math.ceil(countdownLeft);
+        if (n !== shownCount) {            // 換數字時才重設文字並重播動畫
+          shownCount = n;
+          showCountdown(String(n), 'cd-num');
+        }
+      }
+      return;
+    }
+    if (state !== 'playing') return;
+
+    elapsed += dt;
+    if (goLeft > 0) {
+      goLeft -= dt;
+      if (goLeft <= 0) hideCountdown();
+    }
+    // 竹簍閃爍隨遊戲時間扣；放在碰撞判定之前，打到石頭那一幀設定的值在同一幀渲染時仍是滿的（當幀即「亮」）
+    if (basketFlash > 0) basketFlash = Math.max(0, basketFlash - dt);
+    updateGod(dt);
+    updatePlayer(dt);
+
+    // 依排程掉落金幣
+    while (spawned < TOTAL_COINS && spawnTimes[spawned] <= elapsed) {
+      coins.push({ x: clamp(god.x + (Math.random() - 0.5) * godHalf() * 1.4, coinR(), W - coinR()), y: godY() + godHalf() * 0.3, spin: Math.random() * Math.PI * 2 });
+      spawned++;
+    }
+
+    // 依排程掉落石頭：畫面上方邊緣、隨機水平位置（整顆在左右邊界內）
+    while (stonesSpawned < TOTAL_STONES && stoneTimes[stonesSpawned] <= elapsed) {
+      var sr = stoneR();
+      stones.push({
+        x: sr + Math.random() * Math.max(0, W - 2 * sr),
+        y: -sr,                                   // 從畫面頂端外側進場
+        rot: Math.random() * Math.PI * 2,
+        shape: makeStoneShape()
+      });
+      stonesSpawned++;
+    }
+
+    // 本幀得分變化先累加到 delta，最後一次套下限 0（同幀接金幣＋打石頭時結果與處理順序無關）
+    var delta = 0;
+
+    // 金幣下落與判定
+    var v = fallSpeedAt(elapsed);
+    var r = coinR();
+    var py = playerY();
+    var bh = basketHalf();
+    for (var i = coins.length - 1; i >= 0; i--) {
+      var c = coins[i];
+      var prevY = c.y;
+      c.y += v * dt;
+      c.spin += dt * 6;
+      // 穿過竹簍口那一刻判定是否接到
+      if (prevY < py && c.y >= py) {
+        if (Math.abs(c.x - player.x) <= bh + r * 0.3) {
+          delta += 1;
+          coinsCaught++;
+          playCoinSound();
+          effects.push({ x: c.x, y: py, life: 0.6, kind: 'coin' });
+          coins.splice(i, 1);
+          continue;
+        }
+      }
+      if (c.y - r > H) coins.splice(i, 1);
+    }
+
+    // 石頭下落與判定（判定方式與金幣相同，速度相同）
+    var srr = stoneR();
+    for (var k = stones.length - 1; k >= 0; k--) {
+      var s = stones[k];
+      var sPrevY = s.y;
+      s.y += v * dt;
+      s.rot += dt * 1.5;
+      if (sPrevY < py && s.y >= py && Math.abs(s.x - player.x) <= bh + srr * 0.3) {
+        delta -= STONE_PENALTY;
+        stonesHit++;
+        basketFlash = BASKET_FLASH_TOTAL;   // 打到石頭：竹簍從頭閃兩下（設定而非累加，閃爍中再打到也重新開始）
+        effects.push({ x: s.x, y: py, life: 0.6, kind: 'stone' });   // 打到石頭不播音效
+        stones.splice(k, 1);
+        continue;
+      }
+      if (s.y - srr > H) stones.splice(k, 1);    // 閃過：掉出底部移除，不扣分
+    }
+
+    if (delta !== 0) score = Math.max(0, score + delta);
+
+    for (var j = effects.length - 1; j >= 0; j--) {
+      effects[j].life -= dt;
+      effects[j].y -= 60 * dt;
+      if (effects[j].life <= 0) effects.splice(j, 1);
+    }
+
+    if (elapsed >= GAME_DURATION) endGame();
+  }
+
+  function updateGod(dt) {
+    var dx = god.target - god.x;
+    var step = god.speed * dt;
+    if (Math.abs(dx) <= step) {
+      god.x = god.target;
+      pickGodTarget();
+    } else {
+      god.dir = dx > 0 ? 1 : -1;
+      god.x += god.dir * step;
+    }
+    god.bob += dt * 3;
+  }
+
+  function updatePlayer(dt) {
+    var bh = basketHalf();
+    var maxSpeed = W * 1.1;
+    if (keys.left || keys.right) {
+      var d = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+      player.x += d * maxSpeed * dt;
+    } else if (pointerX !== null) {
+      player.x = pointerX;
+    }
+    player.x = clamp(player.x, bh, W - bh);
+  }
+
+  // ===== 繪圖 =====
+  function drawBackground() {
+    var g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#b3181b');
+    g.addColorStop(0.6, '#d9402a');
+    g.addColorStop(1, '#f08a3c');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+    // 地面
+    ctx.fillStyle = '#6b3a1a';
+    ctx.fillRect(0, H - 10, W, 10);
+  }
+
+  function drawCloud(x, y, s) {
+    ctx.fillStyle = '#fff6e0';
+    ctx.strokeStyle = '#e8b04a';
+    ctx.lineWidth = Math.max(2, s * 0.04);
+    var parts = [[-0.75, 0.05, 0.32], [-0.35, -0.12, 0.42], [0.1, -0.15, 0.45], [0.55, -0.02, 0.36], [0.85, 0.1, 0.25]];
+    ctx.beginPath();
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i];
+      ctx.moveTo(x + p[0] * s + p[2] * s, y + p[1] * s);
+      ctx.arc(x + p[0] * s, y + p[1] * s, p[2] * s, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.ellipse(x, y + s * 0.12, s * 1.05, s * 0.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // 祥雲漩渦
+    ctx.strokeStyle = '#f2c35c';
+    ctx.beginPath();
+    ctx.arc(x - s * 0.35, y - s * 0.1, s * 0.15, Math.PI * 0.2, Math.PI * 1.6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x + s * 0.3, y - s * 0.08, s * 0.15, Math.PI * 1.4, Math.PI * 2.8);
+    ctx.stroke();
+  }
+
+  function drawGod() {
+    var s = godHalf();
+    var x = god.x;
+    var y = godY() + Math.sin(god.bob) * 3;
+    // 身體（紅袍）
+    ctx.fillStyle = '#c8102e';
+    ctx.strokeStyle = '#7a0010';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x - s * 0.75, y + s * 0.25);
+    ctx.quadraticCurveTo(x - s * 0.7, y - s * 0.45, x, y - s * 0.5);
+    ctx.quadraticCurveTo(x + s * 0.7, y - s * 0.45, x + s * 0.75, y + s * 0.25);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    // 金色腰帶
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillRect(x - s * 0.62, y - s * 0.12, s * 1.24, s * 0.12);
+    // 祥雲（站在雲上，畫在身體下方前景）
+    drawCloud(x, y + s * 0.3, s * 0.9);
+    // 頭
+    var hy = y - s * 0.78;
+    ctx.fillStyle = '#ffd9b3';
+    ctx.beginPath(); ctx.arc(x, hy, s * 0.32, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#a86b4a'; ctx.lineWidth = 1.5; ctx.stroke();
+    // 眼睛、笑臉
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x - s * 0.12, hy - s * 0.04, s * 0.05, Math.PI, 0); ctx.stroke();
+    ctx.beginPath(); ctx.arc(x + s * 0.12, hy - s * 0.04, s * 0.05, Math.PI, 0); ctx.stroke();
+    // 腮紅
+    ctx.fillStyle = 'rgba(255,100,100,0.5)';
+    ctx.beginPath(); ctx.arc(x - s * 0.2, hy + s * 0.06, s * 0.05, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + s * 0.2, hy + s * 0.06, s * 0.05, 0, Math.PI * 2); ctx.fill();
+    // 鬍子
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.moveTo(x - s * 0.14, hy + s * 0.14);
+    ctx.quadraticCurveTo(x, hy + s * 0.55, x + s * 0.14, hy + s * 0.14);
+    ctx.quadraticCurveTo(x, hy + s * 0.22, x - s * 0.14, hy + s * 0.14);
+    ctx.fill();
+    // 官帽
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(x - s * 0.3, hy - s * 0.48, s * 0.6, s * 0.2);
+    ctx.beginPath();
+    ctx.ellipse(x, hy - s * 0.48, s * 0.3, s * 0.12, 0, Math.PI, 0);
+    ctx.fill();
+    // 帽翅
+    ctx.fillRect(x - s * 0.62, hy - s * 0.42, s * 0.32, s * 0.07);
+    ctx.fillRect(x + s * 0.3, hy - s * 0.42, s * 0.32, s * 0.07);
+    ctx.fillStyle = '#ffd23f';
+    ctx.beginPath(); ctx.arc(x, hy - s * 0.38, s * 0.06, 0, Math.PI * 2); ctx.fill();
+    // 手上的元寶
+    drawIngot(x + god.dir * s * 0.55, y - s * 0.25, s * 0.25);
+  }
+
+  function drawIngot(x, y, s) {
+    ctx.fillStyle = '#ffcc00';
+    ctx.strokeStyle = '#b37400';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x - s, y - s * 0.2);
+    ctx.quadraticCurveTo(x - s * 0.5, y + s * 0.6, x, y + s * 0.6);
+    ctx.quadraticCurveTo(x + s * 0.5, y + s * 0.6, x + s, y - s * 0.2);
+    ctx.quadraticCurveTo(x + s * 0.5, y, x, y - s * 0.05);
+    ctx.quadraticCurveTo(x - s * 0.5, y, x - s, y - s * 0.2);
+    ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(x, y - s * 0.05, s * 0.35, s * 0.28, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  }
+
+  function drawCoin(c) {
+    var r = coinR();
+    var sx = Math.abs(Math.cos(c.spin)) * 0.65 + 0.35; // 旋轉效果
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.scale(sx, 1);
+    ctx.fillStyle = '#ffd23f';
+    ctx.strokeStyle = '#b37400';
+    ctx.lineWidth = Math.max(1.5, r * 0.15);
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.75, 0, Math.PI * 2);
+    ctx.strokeStyle = '#e0a000'; ctx.lineWidth = Math.max(1, r * 0.08); ctx.stroke();
+    // 方孔
+    ctx.fillStyle = '#b33a1a';
+    ctx.fillRect(-r * 0.25, -r * 0.25, r * 0.5, r * 0.5);
+    ctx.restore();
+  }
+
+  // 石頭：灰色不規則多邊形；以絕對座標繪製、不使用 translate／scale（和金幣在繪圖呼叫上可區分）
+  function drawStone(s) {
+    var r = stoneR();
+    var n = s.shape.length;
+    ctx.beginPath();
+    for (var i = 0; i < n; i++) {
+      var a = s.rot + i * Math.PI * 2 / n;
+      var px = s.x + Math.cos(a) * r * s.shape[i];
+      var py2 = s.y + Math.sin(a) * r * s.shape[i];
+      if (i === 0) ctx.moveTo(px, py2); else ctx.lineTo(px, py2);
+    }
+    ctx.closePath();
+    ctx.fillStyle = '#8e8e8e';
+    ctx.strokeStyle = '#3d3d3d';
+    ctx.lineWidth = Math.max(1.5, r * 0.14);
+    ctx.fill(); ctx.stroke();
+    // 亮面與裂紋，增加石頭質感
+    ctx.fillStyle = '#b8b8b8';
+    ctx.beginPath(); ctx.ellipse(s.x - r * 0.25, s.y - r * 0.28, r * 0.3, r * 0.18, -0.5, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#5a5a5a'; ctx.lineWidth = Math.max(1, r * 0.08);
+    ctx.beginPath(); ctx.moveTo(s.x + r * 0.1, s.y + r * 0.05); ctx.lineTo(s.x + r * 0.35, s.y + r * 0.35); ctx.stroke();
+  }
+
+  // 竹簍是否處於閃爍的「亮」段：以已閃秒數切成每段 BASKET_FLASH_STEP，只有第 0、2 段為亮
+  // （明確只認 0、2：剩餘秒數扣到極小正數時，浮點誤差可能算出第 4 段，不能被當成偶數段而多亮一下）
+  function basketFlashOn() {
+    if (basketFlash <= 0) return false;
+    var seg = Math.floor((BASKET_FLASH_TOTAL - basketFlash) / BASKET_FLASH_STEP);
+    return seg === 0 || seg === 2;
+  }
+
+  function drawBasket() {
+    var bh = basketHalf();
+    var x = player.x;
+    var top = playerY();
+    var h = unit() * 0.09;
+    var on = basketFlashOn();   // 亮段：只換顏色，形狀、位置、外框不變，竹簍不會消失
+    // 竹簍本體（梯形）
+    ctx.fillStyle = on ? '#fff8e1' : '#c99a4a';
+    ctx.strokeStyle = '#7a5520';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x - bh, top);
+    ctx.lineTo(x + bh, top);
+    ctx.lineTo(x + bh * 0.75, top + h);
+    ctx.lineTo(x - bh * 0.75, top + h);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    // 編織紋
+    ctx.save();
+    ctx.clip();
+    ctx.strokeStyle = on ? 'rgba(200,160,90,0.45)' : 'rgba(110,70,20,0.6)';
+    ctx.lineWidth = 1.5;
+    for (var i = -6; i <= 6; i++) {
+      ctx.beginPath();
+      ctx.moveTo(x + i * bh * 0.2, top);
+      ctx.lineTo(x + i * bh * 0.2 + h * 0.6, top + h);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x + i * bh * 0.2, top);
+      ctx.lineTo(x + i * bh * 0.2 - h * 0.6, top + h);
+      ctx.stroke();
+    }
+    ctx.restore();
+    // 簍口
+    ctx.fillStyle = on ? '#e6cf9f' : '#8a5a20';
+    ctx.beginPath();
+    ctx.ellipse(x, top, bh, h * 0.14, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawHUD() {
+    var fs = Math.max(18, Math.min(30, W * 0.05));
+    ctx.font = 'bold ' + fs + 'px "PingFang TC", "Microsoft JhengHei", sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(80,0,0,0.85)';
+    ctx.fillStyle = '#ffe9a8';
+
+    var timeLeft = state === 'playing' ? Math.max(0, Math.ceil(GAME_DURATION - elapsed))
+      : state === 'over' ? 0 : GAME_DURATION;
+    var tText = '⏱ ' + timeLeft + ' 秒';
+    ctx.textAlign = 'left';
+    ctx.strokeText(tText, 14, 12);
+    ctx.fillText(tText, 14, 12);
+
+    var sText = '💰 ' + score;
+    ctx.textAlign = 'right';
+    ctx.strokeText(sText, W - 14, 12);
+    ctx.fillText(sText, W - 14, 12);
+  }
+
+  function drawEffects() {
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 22px sans-serif';
+    for (var i = 0; i < effects.length; i++) {
+      var e = effects[i];
+      ctx.globalAlpha = Math.max(0, e.life / 0.6);
+      if (e.kind === 'stone') {
+        // 紅字在紅橘背景上加深色外框；畫得比「+1」高，同幀兩者都出現時不重疊
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#3a0000';
+        ctx.strokeText('-5', e.x, e.y - 46);
+        ctx.fillStyle = '#ff2b2b';
+        ctx.fillText('-5', e.x, e.y - 46);
+      } else {
+        ctx.fillStyle = '#fff3a0';
+        ctx.fillText('+1', e.x, e.y - 20);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function render() {
+    drawBackground();
+    if (player && god) {
+      drawGod();
+      for (var i = 0; i < coins.length; i++) drawCoin(coins[i]);
+      for (var k = 0; k < stones.length; k++) drawStone(stones[k]);
+      drawBasket();
+      drawEffects();
+    }
+    drawHUD();
+  }
+
+  // ===== 主迴圈 =====
+  var last = null;
+  function loop(now) {
+    if (last === null) last = now;
+    // dt 上限 0.05 秒：分頁切走時遊戲時間不會暴衝，所有金幣仍會完整掉完
+    var dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  window.addEventListener('resize', resize);
+  resize();
+  resetGame();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
